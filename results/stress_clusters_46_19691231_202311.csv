@@ -1,2 +1,0 @@
-cluster_id,lat,lon,cen_row_px,cen_col_px,mean_pri,min_pri,pixel_count,radius_px,radius_m,severity,exceeds_radius_gate,mean_in_window,index
-9,43.7826358,-79.4661694,371,215,-0.0107,-0.198,471,100.0,4.09,MODERATE,True,True,PRI
