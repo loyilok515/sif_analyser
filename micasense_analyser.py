@@ -137,6 +137,7 @@ class MicaSenseAnalyzer:
         want_rgb               = True,
         max_tilt_deg           = 15.0,
         tree_height            = 10.0,
+        home_alt               = 70.0, 
         serial_port            = "/dev/ttyUSB0",
         serial_baud            = 57600,
         serial_settle_s        = 1.0,
@@ -147,6 +148,7 @@ class MicaSenseAnalyzer:
         self.min_cluster_radius_m  = min_cluster_radius_m
         self.max_tilt_deg          = max_tilt_deg
         self.tree_height           = tree_height
+        self.home_alt              = home_alt
 
         self.stress_thresholds = {
             "NDVI": (ndvi_stress_min, ndvi_stress_max),
@@ -454,7 +456,7 @@ class MicaSenseAnalyzer:
         crop_w = c1 - c0
 
         # Ground sampling distance (m/px) at nadir
-        dist_drone_tree = alt_m - self.tree_height
+        dist_drone_tree = alt_m - self.home_alt - self.tree_height
         gsd = (dist_drone_tree * self.sensor_width_mm) / (self.focal_length_mm * full_w)
 
         # Degrees per pixel at nadir (approximate flat-earth)
@@ -1082,9 +1084,11 @@ if __name__ == "__main__":
     # ── Operating-altitude gate ──────────────────────────────────────────────
     # The pipeline runs only while GPS altitude is at/above this value (metres).
     # Below it, the script idles and re-polls GPS every POLL_INTERVAL_S seconds.
-    HOME_ALT_M          = 0.0       # ← set your home altitude here (the "yyy m")
-    MIN_OPERATING_ALT_M = 50.0      # ← set your threshold here (the "xxx m")
-    POLL_INTERVAL_S     = 5.0       # how often to re-check GPS while grounded
+    gps_instant = MicaSenseAnalyzer(camera_ip = "http://192.168.1.83")
+    home_lat, home_lon, home_alt = gps_instant.obtain_gps()
+    HOME_ALT_M              = home_alt       # ← set your home altitude here (the "yyy m")
+    MIN_OPERATING_ALT_AGL_M = 25.0      # ← set your threshold here (the "xxx m")
+    POLL_INTERVAL_S         = 5.0       # how often to re-check GPS while grounded
 
     analyzer = MicaSenseAnalyzer(
         camera_ip             = "http://192.168.1.83",
@@ -1101,13 +1105,14 @@ if __name__ == "__main__":
         min_pixels            = 30,
         crop_fraction         = 0.25,
         max_tilt_deg          = 15.0,
-        tree_height           = 20.0,
+        tree_height           = 0.0,
+        home_alt              = HOME_ALT_M, 
         serial_port           = "/dev/ttyUSB0",
         serial_baud           = 57600,
         serial_settle_s       = 0.02         # seconds to wait before writing
     )
 
-    print(f"\nWaiting for altitude ≥ {MIN_OPERATING_ALT_M} m to begin captures. "
+    print(f"\nWaiting for altitude ≥ {MIN_OPERATING_ALT_AGL_M} m to begin captures. "
           f"Ctrl+C to stop.")
 
     capture_idx = 0
@@ -1121,8 +1126,8 @@ if __name__ == "__main__":
                 time.sleep(POLL_INTERVAL_S)
                 continue
 
-            if alt < HOME_ALT_M + MIN_OPERATING_ALT_M:
-                print(f"  Altitude {alt:.1f} m < {HOME_ALT_M + MIN_OPERATING_ALT_M} m — idle. "
+            if alt < HOME_ALT_M + MIN_OPERATING_ALT_AGL_M:
+                print(f"  Altitude {alt:.1f} m < {HOME_ALT_M + MIN_OPERATING_ALT_AGL_M} m — idle. "
                       f"Re-checking in {POLL_INTERVAL_S}s.")
                 time.sleep(POLL_INTERVAL_S)
                 continue
@@ -1131,7 +1136,7 @@ if __name__ == "__main__":
             capture_idx += 1
             stamp = time.strftime("%Y%m%d_%H%M%S")
             print(f"\n{'#'*60}\n# Capture {capture_idx}  "
-                  f"(alt {alt:.1f} m ≥ {HOME_ALT_M + MIN_OPERATING_ALT_M} m)  {stamp}\n{'#'*60}")
+                  f"(alt {alt:.1f} m ≥ {HOME_ALT_M + MIN_OPERATING_ALT_AGL_M} m)  {stamp}\n{'#'*60}")
 
             try:
                 result = analyzer.run(
