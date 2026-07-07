@@ -1053,6 +1053,7 @@ if __name__ == "__main__":
     # ── Operating-altitude gate ──────────────────────────────────────────────
     # The pipeline runs only while GPS altitude is at/above this value (metres).
     # Below it, the script idles and re-polls GPS every POLL_INTERVAL_S seconds.
+    HOME_ALT_M          = 0.0       # ← set your home altitude here (the "yyy m")
     MIN_OPERATING_ALT_M = 50.0      # ← set your threshold here (the "xxx m")
     POLL_INTERVAL_S     = 5.0       # how often to re-check GPS while grounded
 
@@ -1090,8 +1091,8 @@ if __name__ == "__main__":
                 time.sleep(POLL_INTERVAL_S)
                 continue
 
-            if alt < MIN_OPERATING_ALT_M:
-                print(f"  Altitude {alt:.1f} m < {MIN_OPERATING_ALT_M} m — idle. "
+            if alt < HOME_ALT_M + MIN_OPERATING_ALT_M:
+                print(f"  Altitude {alt:.1f} m < {HOME_ALT_M + MIN_OPERATING_ALT_M} m — idle. "
                       f"Re-checking in {POLL_INTERVAL_S}s.")
                 time.sleep(POLL_INTERVAL_S)
                 continue
@@ -1100,7 +1101,7 @@ if __name__ == "__main__":
             capture_idx += 1
             stamp = time.strftime("%Y%m%d_%H%M%S")
             print(f"\n{'#'*60}\n# Capture {capture_idx}  "
-                  f"(alt {alt:.1f} m ≥ {MIN_OPERATING_ALT_M} m)  {stamp}\n{'#'*60}")
+                  f"(alt {alt:.1f} m ≥ {HOME_ALT_M + MIN_OPERATING_ALT_M} m)  {stamp}\n{'#'*60}")
 
             try:
                 result = analyzer.run(
