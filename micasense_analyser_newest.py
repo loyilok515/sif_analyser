@@ -1089,13 +1089,13 @@ if __name__ == "__main__":
     analyzer = MicaSenseAnalyzer(
         camera_ip             = "http://192.168.1.83",
         cache_format          = "tif",      # "jpeg" (fast 8-bit) or "tif" (16-bit)
-        index_mode            = "pri",      # "ndvi" | "pri" | "both"
+        index_mode            = "ndvi",      # "ndvi" | "pri" | "both"
         want_rgb              = False,
         ndvi_stress_min       = 0.10,
-        ndvi_stress_max       = 0.35,
+        ndvi_stress_max       = 0.60,
         pri_stress_min        = -0.20,
         pri_stress_max        = 0.05,
-        min_cluster_radius_m  = 5.0,
+        min_cluster_radius_m  = 4.0,
         n_clusters            = 10,
         n_output_clusters     = 2,
         min_pixels            = 30,
