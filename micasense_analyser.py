@@ -14,7 +14,7 @@ Band map (1-indexed, matches MicaSense API):
 Index / display band requirements
     RGB display  : 1 (G), 2 (G2), 3 (R)          ← pseudo-colour
     NDVI         : 3 (R),               5 (NIR)
-    PRI          : 1 (530 nm proxy),    2 (570 nm) → (B2-B1)/(B2+B1)
+    PRI          : 1 (530 nm proxy),    2 (570 nm) → (B1-B2)/(B1+B2)
 
 Attitude-aware geotransform
     Roll, pitch, yaw (DLS IMU) are used to:
@@ -388,13 +388,13 @@ class MicaSenseAnalyzer:
     @staticmethod
     def compute_pri(bands: dict) -> np.ndarray:
         """
-        PRI = (Band2 - Band1) / (Band2 + Band1)
+        PRI = (Band1 - Band2) / (Band1 + Band2)
         Bands used: 1 = 528 nm (reference), 2 = 570 nm (xanthophyll-sensitive)
-        Formula matches the user specification: (B2 - B1) / (B2 + B1)
+        Formula matches the user specification: (B1 - B2) / (B1 + B2)
         Range: ≈ −1 … +1. Healthy: > 0.05; stressed: < 0.05.
         """
         b1 = bands["1"]; b2 = bands["2"]
-        return (b2 - b1) / (b2 + b1 + 1e-6)
+        return (b1 - b2) / (b1 + b2 + 1e-6)
 
     @staticmethod
     def build_rgb(bands: dict) -> np.ndarray:
