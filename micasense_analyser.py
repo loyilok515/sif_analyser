@@ -34,7 +34,10 @@ import pandas as pd
 import requests
 import urllib3
 from PIL import Image
+import tifffile
 import serial
+from pathlib import Path
+
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -136,11 +139,12 @@ class MicaSenseAnalyzer:
         crop_fraction          = 0.25,
         want_rgb               = True,
         max_tilt_deg           = 15.0,
-        tree_height            = 10.0,
-        home_alt               = 70.0, 
+        tree_height            = 0.0,
+        home_alt               = 0.0, 
         serial_port            = "/dev/ttyUSB0",
         serial_baud            = 57600,
         serial_settle_s        = 1.0,
+        image_path             = None,
     ):
         self.camera_ip             = camera_ip.rstrip("/")
         self.cache_format          = cache_format.lower()
@@ -167,6 +171,7 @@ class MicaSenseAnalyzer:
         self.serial_port     = serial_port
         self.serial_baud     = serial_baud
         self.serial_settle_s = serial_settle_s
+        self.image_path      = image_path
 
         self._needed_bands: set[str] = _required_bands(
             self.index_mode, want_rgb=self.want_rgb
@@ -284,7 +289,6 @@ class MicaSenseAnalyzer:
                 img = Image.open(io.BytesIO(resp.content)).convert("L")
                 arr = np.array(img, dtype=float)
             else:
-                import tifffile
                 arr = tifffile.imread(io.BytesIO(resp.content)).astype(float)
                 if arr.ndim == 3:
                     arr = arr[:, :, 0]
@@ -292,6 +296,47 @@ class MicaSenseAnalyzer:
             bands[band_key] = arr
             print(f"  Band {band_key} ({self.BAND_LABELS.get(band_key,'?')}): "
                   f"{arr.shape}  min={arr.min():.0f}  max={arr.max():.0f}")
+
+        return bands
+
+    # ──────────────────────────────────────────────────────────────────────────
+    #  MANUAL IMAGE INPUT
+    # ──────────────────────────────────────────────────────────────────────────    
+
+    def load_bands(self) -> dict[str, np.ndarray]:
+        """
+        Load the required bands from TIFF files named
+
+            <self.image_path>_1.tif
+            <self.image_path>_2.tif
+            ...
+
+        Returns
+        -------
+        dict
+            {"1": ndarray, "3": ndarray, ...}
+        """
+        prefix = Path(self.image_path)
+        bands: dict[str, np.ndarray] = {}
+
+        for band_key in sorted(self._needed_bands):
+            filepath = prefix.parent / f"{prefix.name}_{band_key}.tif"
+
+            if not filepath.exists():
+                raise FileNotFoundError(f"Band {band_key} not found: {filepath}")
+
+            arr = tifffile.imread(filepath).astype(float)
+
+            # Remove singleton channel if present
+            if arr.ndim == 3:
+                arr = arr[:, :, 0]
+
+            bands[band_key] = arr
+
+            print(
+                f"Band {band_key} ({self.BAND_LABELS.get(band_key, '?')}): "
+                f"{arr.shape}  min={arr.min():.0f}  max={arr.max():.0f}"
+            )
 
         return bands
 
@@ -683,14 +728,14 @@ class MicaSenseAnalyzer:
             ax.plot(row.cen_col_px, row.cen_row_px, '+',
                     color=color, markersize=10, markeredgewidth=2)
             gate_tag = " ⚠LARGE" if row.exceeds_radius_gate else ""
-            ax.annotate(
-                f"{row.severity[0]}{gate_tag}  {row[val_col]:.2f}\n"
-                f"{row.lat:.5f}\n{row.lon:.5f}",
-                xy=(row.cen_col_px, row.cen_row_px),
-                xytext=(6, 6), textcoords="offset points",
-                fontsize=6.5, color="white",
-                bbox=dict(boxstyle="round,pad=0.2", fc=color, alpha=0.85),
-            )
+            # ax.annotate(
+            #     f"{row.severity[0]}{gate_tag}  {row[val_col]:.2f}\n"
+            #     f"{row.lat:.5f}\n{row.lon:.5f}",
+            #     xy=(row.cen_col_px, row.cen_row_px),
+            #     xytext=(6, 6), textcoords="offset points",
+            #     fontsize=6.5, color="white",
+            #     bbox=dict(boxstyle="round,pad=0.2", fc=color, alpha=0.85),
+            # )
 
     def plot_results(
         self,
@@ -756,7 +801,7 @@ class MicaSenseAnalyzer:
             im = axes[0, col].imshow(
                 idx_map, cmap="RdYlGn", vmin=-0.1, vmax=vmax, origin="upper"
             )
-            plt.colorbar(im, ax=axes[0, col], label=idx_name, shrink=0.8)
+            plt.colorbar(im, ax=axes[0, col], label=idx_name, shrink=0.65)
             axes[0, col].set_title(f"{idx_name} Map (centre crop)", fontsize=12)
             axes[0, col].axis("off")
 
@@ -764,9 +809,10 @@ class MicaSenseAnalyzer:
             overlay[(idx_map >= s_min) & (idx_map < s_max)] = [1, 0.6, 0, 0.4]
             axes[0, col].imshow(overlay, origin="upper")
 
-            axes[1, col].imshow(
+            im_cluster = axes[1, col].imshow(
                 idx_map, cmap="RdYlGn", vmin=-0.1, vmax=vmax, origin="upper"
             )
+            plt.colorbar(im_cluster, ax=axes[1, col], label=idx_name, shrink=0.65)
             health_label = health_summary.get(idx_name, "?") if health_summary else "?"
             axes[1, col].set_title(
                 f"{idx_name} Clusters  [{s_min}–{s_max}]  →  {health_label}",
@@ -1029,124 +1075,290 @@ class MicaSenseAnalyzer:
             "geo":            geo,
             "attitude":       attitude,
         }
+    
+
+    def run_standalone(
+        self,
+        lat_deg: float,
+        lon_deg: float,
+        alt_m: float,
+        save_csv: str = "stress_clusters.csv",
+        save_plot: str = "micasense_result.png",
+    ) -> dict:
+        """
+        Execute the processing pipeline using TIFF files stored on disk.
+
+        Assumes self.image_path points to files named
+
+            <image_path>_1.tif
+            <image_path>_2.tif
+            ...
+
+        GPS and altitude are supplied by the caller.
+        """
+        sep = "─" * 60
+        t0 = time.perf_counter()
+
+        # ------------------------------------------------------------------
+        # 1. Load bands
+        # ------------------------------------------------------------------
+        print(f"\n{sep}\nStep 1 — Load TIFF bands")
+        t_load = time.perf_counter()
+        bands_raw = self.load_bands()
+        print(f"  ↳ loading took {time.perf_counter() - t_load:.2f} s")
+
+        sample = next(iter(bands_raw.values()))
+        full_h, full_w = sample.shape
+
+        # ------------------------------------------------------------------
+        # 2. Crop
+        # ------------------------------------------------------------------
+        print(f"\n{sep}\nStep 2 — Centre crop")
+        bands_crop, crop_box = self.crop_centre(bands_raw)
+        del bands_raw
+
+        # ------------------------------------------------------------------
+        # 3. Align
+        # ------------------------------------------------------------------
+        print(f"\n{sep}\nStep 3 — Band alignment (ECC)")
+        t_ecc = time.perf_counter()
+        bands_aligned = self.align_bands(bands_crop, reference_band="3")
+        print(f"  ↳ ECC took {time.perf_counter() - t_ecc:.2f} s")
+
+        # ------------------------------------------------------------------
+        # 4. RGB preview
+        # ------------------------------------------------------------------
+        has_rgb = {"1", "2", "3"}.issubset(bands_aligned)
+        rgb = self.build_rgb(bands_aligned) if has_rgb else None
+
+        if not has_rgb:
+            print("  RGB preview skipped (need bands 1,2,3).")
+
+        # ------------------------------------------------------------------
+        # 5. Compute indices
+        # ------------------------------------------------------------------
+        print(f"\n{sep}\nStep 4 — Index computation ({self.index_mode})")
+
+        index_maps = {}
+
+        if self.index_mode in ("ndvi", "both"):
+            if {"3", "5"}.issubset(bands_aligned):
+                ndvi = self.compute_ndvi(bands_aligned)
+                index_maps["NDVI"] = ndvi
+
+        if self.index_mode in ("pri", "both"):
+            if {"1", "2"}.issubset(bands_aligned):
+                pri = self.compute_pri(bands_aligned)
+                index_maps["PRI"] = pri
+
+        if not index_maps:
+            raise ValueError("No vegetation indices could be computed.")
+
+        # ------------------------------------------------------------------
+        # 6. Geotransform
+        # ------------------------------------------------------------------
+        print(f"\n{sep}\nStep 5 — Geotransform")
+
+        # No attitude available for standalone mode.
+        attitude = {
+            "roll_deg": 0.0,
+            "pitch_deg": 0.0,
+            "yaw_deg": 0.0,
+        }
+
+        geo = self.build_geo(
+            lat_deg,
+            lon_deg,
+            alt_m,
+            full_h,
+            full_w,
+            crop_box,
+            attitude=attitude,
+        )
+
+        # ------------------------------------------------------------------
+        # 7. Cluster detection
+        # ------------------------------------------------------------------
+        print(f"\n{sep}\nStep 6 — Stress clusters")
+
+        clusters = {}
+        health_summary = {}
+        all_rows = []
+
+        for idx_name, idx_map in index_maps.items():
+            df, health = self.find_stress_clusters(
+                idx_map,
+                geo,
+                index_name=idx_name,
+            )
+
+            clusters[idx_name] = (df, health)
+            health_summary[idx_name] = health
+
+            if not df.empty:
+                all_rows.append(df)
+
+        overall = (
+            "UNHEALTHY"
+            if "UNHEALTHY" in health_summary.values()
+            else "HEALTHY"
+        )
+
+        # ------------------------------------------------------------------
+        # 8. Save CSV
+        # ------------------------------------------------------------------
+        if save_csv and all_rows:
+            pd.concat(all_rows, ignore_index=True).to_csv(save_csv, index=False)
+            print(f"Saved {save_csv}")
+
+        # ------------------------------------------------------------------
+        # Persist state
+        # ------------------------------------------------------------------
+        self.last_bands_crop = bands_aligned
+        self.last_rgb = rgb
+        self.last_index_maps = index_maps
+        self.last_clusters = clusters
+        self.last_geo = geo
+        self.last_attitude = attitude
+
+        print(f"\n{sep}")
+        print(f"Total pipeline time: {time.perf_counter() - t0:.2f} s")
+
+        # ------------------------------------------------------------------
+        # 9. Plot
+        # ------------------------------------------------------------------
+        if save_plot:
+            self.plot_results(
+                output=save_plot,
+                lat_deg=lat_deg,
+                lon_deg=lon_deg,
+                alt_m=alt_m,
+                health_summary=health_summary,
+            )
+
+        return {
+            "bands_crop": bands_aligned,
+            "rgb": rgb,
+            "index_maps": index_maps,
+            "clusters": clusters,
+            "health_summary": health_summary,
+            "overall_health": overall,
+            "geo": geo,
+            "attitude": attitude,
+        }
 
 
-# # ══════════════════════════════════════════════════════════════════════════════
-# #  STANDALONE USAGE
-# # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  STANDALONE USAGE GIVEN IMAGE
+# ══════════════════════════════════════════════════════════════════════════════
 
-# if __name__ == "__main__":
+if __name__ == "__main__":
 
-#     analyzer = MicaSenseAnalyzer(
-#         camera_ip             = "http://192.168.1.83",
-#         cache_format          = "tif",      # "jpeg" (fast 8-bit) or "tif" (16-bit)
-#         index_mode            = "pri",      # "ndvi" | "pri" | "both"
-#         want_rgb              = False,
+    analyzer = MicaSenseAnalyzer(
+        cache_format          = "tif",      # "jpeg" (fast 8-bit) or "tif" (16-bit)
+        index_mode            = "both",      # "ndvi" | "pri" | "both"
+        want_rgb              = True,
 
-#         # NDVI stress window  (healthy vegetation typically > 0.4)
-#         ndvi_stress_min       = 0.10,
-#         ndvi_stress_max       = 0.35,
+        # NDVI stress window  (healthy vegetation typically > 0.4)
+        ndvi_stress_min       = 0.10,  # -1.0, # 0.10, 
+        ndvi_stress_max       = 0.40,  # 0.0,  # 0.40,
 
-#         # PRI stress window   (healthy > 0.05; stressed < 0.05)
-#         pri_stress_min        = -0.20,
-#         pri_stress_max        =  0.05,
+        # PRI stress window   (healthy > 0.05; stressed < 0.05)
+        pri_stress_min        = -0.20, # -1.0, # -0.20,
+        pri_stress_max        = 0.05,  # 0.0,  # 0.05,
 
-#         # Any stressed cluster with radius > this → overall UNHEALTHY
-#         min_cluster_radius_m  = 5.0,
+        min_cluster_radius_m  = 0.3,
 
-#         n_clusters            = 2,
-#         min_pixels            = 30,
-#         crop_fraction         = 0.25,       # keep centre 50 % of the image
-#         max_tilt_deg          = 15.0,       # warn if tilt exceeds this
-#         tree_height           = 20.0,
-#         serial_port           = "/dev/ttyUSB0",
-#         serial_baud           = 57600,
-#         serial_settle_s       = 0.02         # seconds to wait before writing
-#     )
+        n_clusters            = 4,
+        n_output_clusters     = 2,
+        min_pixels            = 30,
+        crop_fraction         = 0.0, 
+        image_path            = "test_images_turkey/EXP_TURKEY"
+    )
 
-#     result = analyzer.run(
-#         # Override GPS/alt if you have a better source:
-#         # lat_deg  = 42.000000,
-#         # lon_deg  = -80.000000,
-#         # alt_m    = 50.0,
-#         save_csv  = "stress_clusters.csv",
-#         save_plot = "micasense_result.png",
-#     )
+    result = analyzer.run_standalone(
+        # Override GPS/alt:
+        lat_deg  = 42.000000,
+        lon_deg  = -80.000000,
+        alt_m    = 30.0,
+        save_csv  = "stress_clusters.csv",
+        save_plot = "micasense_result.png",
+    )
 
-#     print("\nOverall health:", result["overall_health"])
+    print("\nOverall health:", result["overall_health"])
 
 # # ══════════════════════════════════════════════════════════════════════════════
 # #  LOOP USAGE
 # # ══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    # ── Operating-altitude gate ──────────────────────────────────────────────
-    # The pipeline runs only while GPS altitude is at/above this value (metres).
-    # Below it, the script idles and re-polls GPS every POLL_INTERVAL_S seconds.
-    gps_instant = MicaSenseAnalyzer(camera_ip = "http://192.168.1.83")
-    home_lat, home_lon, home_alt = gps_instant.obtain_gps()
-    HOME_ALT_M              = home_alt       # ← set your home altitude here (the "yyy m")
-    MIN_OPERATING_ALT_AGL_M = 25.0      # ← set your threshold here (the "xxx m")
-    POLL_INTERVAL_S         = 5.0       # how often to re-check GPS while grounded
+#     # ── Operating-altitude gate ──────────────────────────────────────────────
+#     # The pipeline runs only while GPS altitude is at/above this value (metres).
+#     # Below it, the script idles and re-polls GPS every POLL_INTERVAL_S seconds.
+#     gps_instant = MicaSenseAnalyzer(camera_ip = "http://192.168.1.83")
+#     home_lat, home_lon, home_alt = gps_instant.obtain_gps()
+#     HOME_ALT_M              = home_alt       # ← set your home altitude here (the "yyy m")
+#     MIN_OPERATING_ALT_AGL_M = 25.0      # ← set your threshold here (the "xxx m")
+#     POLL_INTERVAL_S         = 5.0       # how often to re-check GPS while grounded
 
-    analyzer = MicaSenseAnalyzer(
-        camera_ip             = "http://192.168.1.83",
-        cache_format          = "tif",      # "jpeg" (fast 8-bit) or "tif" (16-bit)
-        index_mode            = "ndvi",      # "ndvi" | "pri" | "both"
-        want_rgb              = False,
-        ndvi_stress_min       = 0.10,
-        ndvi_stress_max       = 0.60,
-        pri_stress_min        = -0.20,
-        pri_stress_max        = 0.05,
-        min_cluster_radius_m  = 4.0,
-        n_clusters            = 10,
-        n_output_clusters     = 2,
-        min_pixels            = 30,
-        crop_fraction         = 0.25,
-        max_tilt_deg          = 15.0,
-        tree_height           = 0.0,
-        home_alt              = HOME_ALT_M, 
-        serial_port           = "/dev/ttyUSB0",
-        serial_baud           = 57600,
-        serial_settle_s       = 0.02         # seconds to wait before writing
-    )
+#     analyzer = MicaSenseAnalyzer(
+#         camera_ip             = "http://192.168.1.83",
+#         cache_format          = "tif",      # "jpeg" (fast 8-bit) or "tif" (16-bit)
+#         index_mode            = "ndvi",      # "ndvi" | "pri" | "both"
+#         want_rgb              = False,
+#         ndvi_stress_min       = 0.10,
+#         ndvi_stress_max       = 0.60,
+#         pri_stress_min        = -0.20,
+#         pri_stress_max        = 0.05,
+#         min_cluster_radius_m  = 4.0,
+#         n_clusters            = 10,
+#         n_output_clusters     = 2,
+#         min_pixels            = 30,
+#         crop_fraction         = 0.25,
+#         max_tilt_deg          = 15.0,
+#         tree_height           = 0.0,
+#         home_alt              = HOME_ALT_M, 
+#         serial_port           = "/dev/ttyUSB0",
+#         serial_baud           = 57600,
+#         serial_settle_s       = 0.02         # seconds to wait before writing
+#     )
 
-    print(f"\nWaiting for altitude ≥ {MIN_OPERATING_ALT_AGL_M} m to begin captures. "
-          f"Ctrl+C to stop.")
+#     print(f"\nWaiting for altitude ≥ {MIN_OPERATING_ALT_AGL_M} m to begin captures. "
+#           f"Ctrl+C to stop.")
 
-    capture_idx = 0
-    try:
-        while True:
-            # Cheap GPS poll to gate BEFORE the expensive capture/align/analysis.
-            try:
-                lat, lon, alt = analyzer.obtain_gps()
-            except Exception as e:
-                print(f"  GPS poll failed: {e} — retry in {POLL_INTERVAL_S}s.")
-                time.sleep(POLL_INTERVAL_S)
-                continue
+#     capture_idx = 0
+#     try:
+#         while True:
+#             # Cheap GPS poll to gate BEFORE the expensive capture/align/analysis.
+#             try:
+#                 lat, lon, alt = analyzer.obtain_gps()
+#             except Exception as e:
+#                 print(f"  GPS poll failed: {e} — retry in {POLL_INTERVAL_S}s.")
+#                 time.sleep(POLL_INTERVAL_S)
+#                 continue
 
-            if alt < HOME_ALT_M + MIN_OPERATING_ALT_AGL_M:
-                print(f"  Altitude {alt:.1f} m < {HOME_ALT_M + MIN_OPERATING_ALT_AGL_M} m — idle. "
-                      f"Re-checking in {POLL_INTERVAL_S}s.")
-                time.sleep(POLL_INTERVAL_S)
-                continue
+#             if alt < HOME_ALT_M + MIN_OPERATING_ALT_AGL_M:
+#                 print(f"  Altitude {alt:.1f} m < {HOME_ALT_M + MIN_OPERATING_ALT_AGL_M} m — idle. "
+#                       f"Re-checking in {POLL_INTERVAL_S}s.")
+#                 time.sleep(POLL_INTERVAL_S)
+#                 continue
 
-            # Above threshold → run one full capture/analysis cycle.
-            capture_idx += 1
-            stamp = time.strftime("%Y%m%d_%H%M%S")
-            print(f"\n{'#'*60}\n# Capture {capture_idx}  "
-                  f"(alt {alt:.1f} m ≥ {HOME_ALT_M + MIN_OPERATING_ALT_AGL_M} m)  {stamp}\n{'#'*60}")
+#             # Above threshold → run one full capture/analysis cycle.
+#             capture_idx += 1
+#             stamp = time.strftime("%Y%m%d_%H%M%S")
+#             print(f"\n{'#'*60}\n# Capture {capture_idx}  "
+#                   f"(alt {alt:.1f} m ≥ {HOME_ALT_M + MIN_OPERATING_ALT_AGL_M} m)  {stamp}\n{'#'*60}")
 
-            try:
-                result = analyzer.run(
-                    save_csv  = f"results/stress_clusters_{capture_idx}_{stamp}.csv",
-                    save_plot = f"results/micasense_result_{capture_idx}_{stamp}.png",
-                )
-                print(f"\nCapture {capture_idx} overall health: "
-                      f"{result['overall_health']}")
-            except Exception as e:
-                print(f"  Capture {capture_idx} failed: {e} — continuing loop.")
+#             try:
+#                 result = analyzer.run(
+#                     save_csv  = f"results/stress_clusters_{capture_idx}_{stamp}.csv",
+#                     save_plot = f"results/micasense_result_{capture_idx}_{stamp}.png",
+#                 )
+#                 print(f"\nCapture {capture_idx} overall health: "
+#                       f"{result['overall_health']}")
+#             except Exception as e:
+#                 print(f"  Capture {capture_idx} failed: {e} — continuing loop.")
 
-    except KeyboardInterrupt:
-        print(f"\nStopped after {capture_idx} capture(s).")
+#     except KeyboardInterrupt:
+#         print(f"\nStopped after {capture_idx} capture(s).")
